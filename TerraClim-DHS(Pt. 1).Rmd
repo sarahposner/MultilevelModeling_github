@@ -1,0 +1,143 @@
+---
+title: "Terra Climate-"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(survey)
+require("ncdf4")
+library(sf)
+library(raster)
+library(rgdal)
+library(stringr)
+library(rgeos)
+library(stargazer)
+library(raster)
+library(rgdal)
+library(stringr)
+library(rgeos)
+library(stargazer)
+library(Rcpp)
+library(dplyr)
+```
+
+
+```{r}
+#Here is my climate variable with 10 degree buffer.. this gets a little crazy
+
+file_list <- list.files("TerraClimate", full.names = TRUE) ## Gets the names of all files in working directory
+file_list <- file_list[str_sub(file_list, -3, -1) == ".nc"] ## Gets only the netCDF files
+
+## Reading in the point data
+poly1=readOGR("DHS_2014/KEGE71FL.shp") 
+poly1 <- poly1[poly1@coords[,1] > 0,] ## Removing points at 0,0
+poly2_pts = spTransform(poly1, CRS("+init=epsg:3395")) ## Re-projecting polygon to match raster projection. You'll need to make sure this is a good projection for Kenya
+
+## Buffering points to polygons by 10km
+poly2=as(gBuffer(poly2_pts, width = 10000, byid = T), "SpatialPolygonsDataFrame") #This buffers your input polygon by a certain distance
+
+## Create a loop to iterate through each netcdf file you are working with and
+  ## Do all of the lines below. That will create a "list" for each file that
+  ## you will then use to calculate summary statistics later.
+new_list <- list()
+for(i in 1:length(file_list)){
+  #rfe_2013 <- raster("TAMSAT/rfe2013_MAM_seas.v3 (1).nc")
+  clim_raster <- raster(file_list[i])
+  clim_raster <- crop(clim_raster, extend(extent(poly1), 0.5))
+  test <- projectRaster(clim_raster, crs = poly2@proj4string)
+  #plot(test)
+  #plot(poly2, add = T)
+  
+  new_list[[i]] <- extract(test, poly2)
+  print(paste("File", i, "out of", length(file_list)))
+}
+
+saveRDS(new_list, "ClimateExtractions.rds")
+
+#summary(ClimateExtractions) 
+
+  # through each climate file you are looking at for each month
+  # It then pulls out summary statistics from square areas intersecting the polygondefined
+
+ # in poly1
+all_data = list(); count = 1
+for(i in list.files()){
+  spatial_files = list.files(file.path(getwd(), i))
+  spatial_files = subset(spatial_files, str_sub(spatial_files,-7,-1)=="rfe_2013")
+  ## Note the "bil.bil" in the above line refers to the file extension of the rasters.
+  for(j in spatial_files){
+    name = paste(i, "_",str_sub(j, -14,-9), sep = "")
+    test = file.path(getwd(),i,j)
+    test_grid =  raster(test)
+    all_data[[count]] = as.matrix(crop(test_grid, poly2))
+    names(all_data)[[count]] = name
+    count = count+1
+    cat(paste("file", count, "\n"))
+  }
+}
+
+saveRDS(all_data, "Multilevel Modeling/")
+poly2@data <- poly@data$
+```
+
+
+```{r}
+
+mat_list <- list()
+for(i in 1:length(new_list)){
+  for(j in 1:length(new_list[[1]])){
+    if(i == 1){mat_list[[j]] = matrix(-999, nrow = length(new_list),
+                                      ncol = length(new_list[[i]][[j]]))}
+    mat_list[[j]][i,] <- new_list[[i]][[j]]
+  }
+}
+
+
+summarize <- function(matrix_grid, normalize = c(TRUE, FALSE)){
+  matrix_grid[matrix_grid == -999] <- NA
+  if(normalize == TRUE){matrix_grid <- scale(matrix_grid)}
+  site_summary <- rowMeans(matrix_grid, na.rm = T)
+  return(site_summary)
+}
+
+summarized <- lapply(mat_list, summarize, normalize = T) #z-scores
+summarized_raw <- lapply(mat_list, summarize, normalize = F) #raw 
+
+last_matrix <- matrix(-999, nrow = length(new_list[[1]]), ncol = length(new_list))
+for(i in 1:length(summarized)){
+  last_matrix[i,] <- summarized[[i]]
+}
+
+last_matrix_raw <- matrix(-999, nrow = length(new_list[[1]]), ncol = length(new_list))
+for(i in 1:length(summarized)){
+  last_matrix_raw[i,] <- summarized_raw[[i]]
+}
+
+last_matrix <- as.data.frame(last_matrix)
+last_matrix_raw <- as.data.frame(last_matrix_raw)
+
+
+colnames(last_matrix) <- paste("Year", as.character(c(1985:2014)), sep = "_") #z-score
+colnames(last_matrix_raw) <- paste("RawYear", as.character(c(1985:2014)), sep = "_") #raw score
+
+poly2_pts@data <- cbind(poly2_pts@data, last_matrix, last_matrix_raw)
+
+writeOGR(poly2_pts, dsn = "/Users/sarahposner/Documents/Multilevel Modeling/Summarized Data", layer = "Kyle_Code",
+         driver = "ESRI Shapefile", overwrite_layer = T)
+plot(poly2_pts)
+
+my_df <- poly2_pts@data
+my_df <- cbind(my_df,coordinates(poly2_pts))
+```
+
+```{r}
+write.csv(my_df,"Extracted_Terraclim.csv")
+```
+
+
+
+
+
+
+
