@@ -1,0 +1,852 @@
+---
+title: "Analysis"
+output:
+  pdf_document: default
+  word_document: default
+  html_document: default
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache=TRUE)
+```
+
+```{r, include=FALSE}
+library(survey)
+library(dplyr)
+require("ncdf4")
+library(sf)
+library(raster)
+library(rgdal)
+library(stargazer)
+library(rgeos)
+library(stargazer)
+require(knitr)
+library(doBy)
+library(effects)
+library(ggplot2)
+
+DHS<-read.csv("Data/IPUMS_DHS_v4 .csv", na.strings=c("9994", "9995", "9996", "9997", "9998", "9999", "998", "-998", "-999"))
+Climate_Data<-read.csv("Data/Extracted_Terraclim.csv")
+```
+
+```{r, include=FALSE}
+#Left Join Terra Climate and DHS data
+IPUMS_DHS<-(left_join(DHS, Climate_Data, by="DHSID"))
+```
+
+
+
+```{r, include=FALSE}
+#Remove NAs
+IPUMS_DHS$RESIDENT<-na_if(IPUMS_DHS$RESIDENT, "8")
+
+IPUMS_DHS$HHEADSEXHH<- na_if(IPUMS_DHS$HHEADSEXHH, "8")
+IPUMS_DHS$HHEADSEXHH<- na_if(IPUMS_DHS$HHEADSEXHH, "9")
+
+IPUMS_DHS$FLOOR<- na_if(IPUMS_DHS$FLOOR, "996")
+IPUMS_DHS$FLOOR<- na_if(IPUMS_DHS$FLOOR, "997")
+IPUMS_DHS$FLOOR<- na_if(IPUMS_DHS$FLOOR, "998")
+IPUMS_DHS$FLOOR<- na_if(IPUMS_DHS$FLOOR, "999")
+
+
+IPUMS_DHS$WEALTHQ<- na_if(IPUMS_DHS$WEALTHQ, "8")
+
+IPUMS_DHS$EDUCLVL<- na_if(IPUMS_DHS$EDUCLVL, "8")
+
+IPUMS_DHS$KIDCURAGE<- na_if(IPUMS_DHS$KIDCURAGE, "98")
+IPUMS_DHS$KIDCURAGE<- na_if(IPUMS_DHS$KIDCURAGE, "99")
+
+IPUMS_DHS$KIDAGEMO<-na_if(IPUMS_DHS$KIDAGEMO, "99")
+IPUMS_DHS$KIDAGEMO<-na_if(IPUMS_DHS$KIDAGEMO, "98")
+
+IPUMS_DHS$LVLHD<-na_if(IPUMS_DHS$LVLHD, "-998")
+```
+
+##Childhood Stunting
+#Low child height-for-age, or "stunting," is an indicator of chronic malnutrition. The WHO Global Database on Child Growth and Malnutrition considers a height-for-age Z-score (HAZ) between -2 and -3 to represent moderate chronic malnutrition, and HAZ scores below -3 to represent severe chronic malnutrition.
+
+#LIVELIHOODS: #1=Pastoralist, #2=Agro-Past, #3= small farmer, #4=large farmer
+
+#24 to 22 KE LIVELIHOODS: combined the Lake Victoria zone and the Lakeshore Marginal zone into a single zone (KE22 +KE23= Lake Victoria). We also combined the very small zone around Marsabit (KE06 + KE 05=Northern Pastoral) and Mandera Riverine with Northeastern pastoral (KE08 +09)
+
+
+```{r, include=FALSE}
+#RE-coding variables into aggregate categories
+#(1)=stunted < -2 z-scores, (0)=not stunted >2 z-scores (data has no decimals in it, -2=-200)
+IPUMS_DHS$binary_HWHAZWHO<-ifelse(IPUMS_DHS$HWHAZWHO< -200, 1, 0)
+
+#1=Natural/Rudimentary, #0=Finisheed
+IPUMS_DHS$floor_type<-ifelse(IPUMS_DHS$FLOOR<300, 1, 0)
+
+#0=Piped Water, #1= Well Water/Surface Water #2=Purchased from supplier #3=Other
+IPUMS_DHS$drinking_water<-ifelse(IPUMS_DHS$DRINKWTR<2000, 0,
+                          ifelse(IPUMS_DHS$DRINKWTR>2000 & IPUMS_DHS$DRINKWTR<5000, 1, 
+                          ifelse(IPUMS_DHS$DRINKWTR>5000 & IPUMS_DHS$DRINKWTR<6000, 2, 3)))
+    
+
+
+#0= No Facility, #1= Flush, #2= Non-flush, #3=Other
+IPUMS_DHS$Toilet_type<-ifelse(IPUMS_DHS$TOILETTYPE>4999, 3, IPUMS_DHS$TOILETTYPE)
+IPUMS_DHS$Toilet_type<-ifelse(IPUMS_DHS$TOILETTYPE>2000 & IPUMS_DHS$TOILETTYPE<4999, 2, IPUMS_DHS$Toilet_type)
+IPUMS_DHS$Toilet_type<-ifelse(IPUMS_DHS$TOILETTYPE<2000 & IPUMS_DHS$TOILETTYPE>0, 1, IPUMS_DHS$Toilet_type)
+
+#0=not a twin, #1=Twin or multiple
+IPUMS_DHS$Kidtwin<-ifelse(IPUMS_DHS$KIDTWIN>10, 0, 1)
+
+#0=birth order up to 10, #1= birth order 11+
+IPUMS_DHS$Kidbord<- ifelse(IPUMS_DHS$KIDBORD<10, 0, 1)
+
+IPUMS_DHS$Kidsex<-ifelse(IPUMS_DHS$KIDSEX<2, 0, 1)
+```
+
+##TerraClimate: Climate Water Deficit
+
+#DRY Variables:
+#0 to 3="0" (not dry), -1 to 0="1" (dry), -2 to -1= "2" (more dry), less than -2= "3" (most dry)
+
+#WET Variables
+#-3 to 0= "0" (not wet), 0 to 1 = "1" (wet), 1 to 2 = "2" (more wet), more than 2= "3" (most wet)
+
+```{r, include=FALSE}
+#DRY Variables
+
+#2010*
+IPUMS_DHS$Dry_Year2010<-
+  ifelse(IPUMS_DHS$Year_2010>=0 & IPUMS_DHS$Year_2010<=3, "0", 
+         ifelse(IPUMS_DHS$Year_2010>=-1 & IPUMS_DHS$Year_2010<=0, "1", 
+                ifelse(IPUMS_DHS$Year_2010>=-2 & IPUMS_DHS$Year_2010<=-1, "2", "3")))
+                       #ifelse(IPUMS_DHS$Year_2010<=-3, "3", IPUMS_DHS$Year_2010))))
+as.factor(IPUMS_DHS$Dry_Year2010) 
+                                
+#2011*                              
+IPUMS_DHS$Dry_Year2011<-
+  ifelse(IPUMS_DHS$Year_2011>=0 & IPUMS_DHS$Year_2011<=3, "0", 
+         ifelse(IPUMS_DHS$Year_2011>=-1 & IPUMS_DHS$Year_2011<=0, "1", 
+                ifelse(IPUS_DHS$Year_2011>=-2 & IPUMS_DHS$Year_2011<=-1, "2", "3")))
+                       #ifelse(IPUMS_DHS$Year_2011<=-3, "3", IPUMS_DHS$Year_2011))))
+as.factor(IPUMS_DHS$Dry_Year2011) 
+
+#2012 
+IPUMS_DHS$Dry_Year2012<-
+  ifelse(IPUMS_DHS$Year_2012>=0 & IPUMS_DHS$Year_2012<=3, "0",
+         ifelse(IPUMS_DHS$Year_2012>=-1 & IPUMS_DHS$Year_2012<=0, "1",
+                ifelse(IPUMS_DHS$Year_2012>=-2 & IPUMS_DHS$Year_2012<=-1, "2","3")))
+                       #ifelse(IPUMS_DHS$Year_2012<=-3, "3", IPUMS_DHS$Year_2012))))
+as.factor(IPUMS_DHS$Dry_Year2012)                                     
+
+
+#2013
+IPUMS_DHS$Dry_Year2013<-
+  ifelse(IPUMS_DHS$Year_2013>=0 & IPUMS_DHS$Year_2013<=3, "0", 
+         ifelse(IPUMS_DHS$Year_2013>=-1 & IPUMS_DHS$Year_2013<=0, "1", 
+                ifelse(IPUMS_DHS$Year_2013>=-2 & IPUMS_DHS$Year_2013<=-1, "2", "3")))
+                       #ifelse(IPUMS_DHS$Year_2013<=-3, "3", IPUMS_DHS$Year_2013))))
+as.factor(IPUMS_DHS$Dry_Year2013)                             
+
+#WET Variables
+#-3 to 0= "0" (not wet), 0 to 1 = "1" (wet), 1 to 2 = "2" (more wet), 2 to 3= "3" (most wet)
+
+#2010
+IPUMS_DHS$Wet_Year2010<-
+  ifelse(IPUMS_DHS$Year_2010>=-3 & IPUMS_DHS$Year_2010<=0, "0", 
+         ifelse(IPUMS_DHS$Year_2010>=0 & IPUMS_DHS$Year_2010<=1, "1", 
+                ifelse(IPUMS_DHS$Year_2010>=1 & IPUMS_DHS$Year_2010<=2, "2", "3")))
+                       #ifelse(IPUMS_DHS$Year_2010>=2 & IPUMS_DHS$Year_2010<=3, "3", IPUMS_DHS$Year_2010))))
+as.factor(IPUMS_DHS$Wet_Year2010)  
+
+#2011
+IPUMS_DHS$Wet_Year2011<-
+  ifelse(IPUMS_DHS$Year_2011>=-3 & IPUMS_DHS$Year_2011<=0, "0", 
+         ifelse(IPUMS_DHS$Year_2011>=0 & IPUMS_DHS$Year_2011<=1, "1", 
+                ifelse(IPUMS_DHS$Year_2011>=1 & IPUMS_DHS$Year_2011<=2, "2", "3")))
+                       #ifelse(IPUMS_DHS$Year_2011>=2 & IPUMS_DHS$Year_2011<=3, "3", IPUMS_DHS$Year_2011))))
+as.factor(IPUMS_DHS$Wet_Year2011)                               
+ 
+#2012
+IPUMS_DHS$Wet_Year2012<-
+  ifelse(IPUMS_DHS$Year_2012>=-3 & IPUMS_DHS$Year_2012<=0, "0", 
+         ifelse(IPUMS_DHS$Year_2012>=0 & IPUMS_DHS$Year_2012<=1, "1", 
+                ifelse(IPUMS_DHS$Year_2012>=1 & IPUMS_DHS$Year_2012<=2, "2", "3")))
+                        #ifelse(IPUMS_DHS$Year_2012>=2 & IPUMS_DHS$Year_2012<=3, "3",  IPUMS_DHS$Year_2012))))
+as.factor(IPUMS_DHS$Wet_Year2012)   
+
+#2013
+IPUMS_DHS$Wet_Year2013<-
+  ifelse(IPUMS_DHS$Year_2013>=-3 & IPUMS_DHS$Year_2013<=0, "0", 
+         ifelse(IPUMS_DHS$Year_2013>=0 & IPUMS_DHS$Year_2013<=1, "1", 
+                ifelse(IPUMS_DHS$Year_2013>=1 & IPUMS_DHS$Year_2013<=2, "2", "3")))
+                       #ifelse(IPUMS_DHS$Year_2013>=2 & IPUMS_DHS$Year_2013<=3, "3", IPUMS_DHS$Year_2013))))
+as.factor(IPUMS_DHS$Wet_Year2013)   
+```
+
+
+
+```{r}
+myvars<-names(IPUMS_DHS) %in% c("Year_1985", "Year_1986", "Year_1987", "Year_1988", "Year_1989", "Year_1990", "Year_1991", "Year_1992", "Year_1993", "Year_1994", "Year_1995", "Year_1996", "Year_1997", "Year_1998", "Year_1999", "Year_2000", "Year_2001", "Year_2002", "Year_2003", "Year_2004", "Year_2005", "Year_2006", "Year_2007", "Year_2008", "Year_2009", "Year_2014", "RawYear_1985", "RawYear_1986", "RawYear_1987", "RawYear_1988", "RawYear_1989", "RawYear_1990", "RawYear_1991", "RawYear_1992", "RawYear_1993", "RawYear_1994", "RawYear_1995", "RawYear_1996", "RawYear_1997", "RawYear_1998", "RawYear_1999", "RawYear_2000", "RawYear_2001", "RawYear_2002", "RawYear_2003", "RawYear_2004", "RawYear_2005", "RawYear_2006", "RawYear_2007", "RawYear_2008", "RawYear_2009")
+
+#exclude unneccessary climate variables (Year= calculated Z-scores and RawYear= raw value)
+IPUMS_DHS<-IPUMS_DHS[!myvars]
+```
+
+```{r}
+#write.csv(IPUMS_DHS, "check_climate.csv")
+```
+
+```{r, include=FALSE}
+
+final_df <-IPUMS_DHS%>%
+    mutate(URBAN = as.factor(URBAN)) %>% 
+    mutate(EDUCLVL = as.factor(EDUCLVL)) %>% 
+    mutate(floor_type = as.factor(floor_type))%>%
+    mutate(drinking_water=as.factor(drinking_water))%>%
+    mutate(HHEADSEXHH=as.factor(HHEADSEXHH))%>%
+    mutate(Kidage=as.numeric(KIDAGEMO))%>%
+    mutate(WEIGHTFEM=as.numeric(WEIGHTFEM))%>%
+    mutate(HEIGHTFEM=as.numeric(HEIGHTFEM))%>%
+    mutate(Toilet_type=as.factor(Toilet_type))%>%
+    mutate(Kidbord=as.numeric(Kidbord))%>%
+    mutate(binary_HWHAZWHO=as.factor(binary_HWHAZWHO))%>%
+    mutate(WEALTHQ=as.factor(WEALTHQ))%>%
+    mutate(Kidtwin=as.factor(Kidtwin))%>%
+    mutate(HWWEIGHT=as.numeric(HWWEIGHT))%>%
+    mutate(Kidsex=as.factor(Kidsex))%>%
+    mutate(AGE=as.numeric(AGE))%>%
+    mutate(Kidbirthmo=as.numeric(KIDBIRTHMO))%>%
+    mutate(Kidbirthyr=as.numeric(KIDBIRTHYR))%>%
+    mutate(Kid_age= as.numeric(KIDCURAGE))%>%
+    mutate(Kid_dobcmc=as.numeric(KIDDOBCMC))%>%
+    mutate(DHS_Livelihood=as.factor(DHS_LIVELIHOOD))%>%
+    mutate(Livelihood=as.factor(LVLHD))%>%
+    mutate(Dry_Year2010=as.factor(IPUMS_DHS$Dry_Year2010))%>%
+    mutate(Dry_Year2011=as.factor(IPUMS_DHS$Dry_Year2011))%>%
+    mutate(Dry_Year2012=as.factor(IPUMS_DHS$Dry_Year2012))%>%
+    mutate(Dry_Year2013=as.factor(IPUMS_DHS$Dry_Year2013))%>%
+    mutate(Wet_Year2010=as.factor(IPUMS_DHS$Dry_Year2010))%>%
+    mutate(Wet_Year2011=as.factor(IPUMS_DHS$Wet_Year2011))%>%
+    mutate(Wet_Year2012=as.factor(IPUMS_DHS$Wet_Year2012))%>%
+    mutate(Wet_Year2013=as.factor(IPUMS_DHS$Wet_Year2013))%>%
+    mutate(L=as.factor(IPUMS_DHS$DHS_LVLHD_DESCRIP))  
+
+#remove NAs
+#final_df<-na.omit(final_df)
+```
+
+
+
+
+
+```{r, include=FALSE}
+#Correlations
+cor(as.numeric(final_df$Wet_Year2010), as.numeric(final_df$Wet_Year2011))
+cor(as.numeric(final_df$Wet_Year2011), as.numeric(final_df$Wet_Year2010))
+cor(as.numeric(final_df$Wet_Year2011), as.numeric(final_df$Wet_Year2012))
+cor(as.numeric(final_df$Wet_Year2011), as.numeric(final_df$Wet_Year2013))
+cor(as.numeric(final_df$Wet_Year2012), as.numeric(final_df$Wet_Year2013))
+cor(as.numeric(final_df$Dry_Year2011), as.numeric(final_df$Dry_Year2012))
+cor(as.numeric(final_df$Dry_Year2012), as.numeric(final_df$Dry_Year2013))
+cor(as.numeric(final_df$Dry_Year2011), as.numeric(final_df$Dry_Year2013))
+```
+
+
+```{r, include=FALSE}
+#subset to children population by year
+
+sub2010 <- subset(final_df, Kid_dobcmc < 1320) # kids born before 2010
+sub2011 <- subset(final_df, Kid_dobcmc < 1332) #kids born before 2011
+sub2012 <- subset(final_df, Kid_dobcmc < 1344) # kids born before 2012
+sub2013 <- subset(final_df, Kid_dobcmc < 1356) # kids born before 2013
+sub2014 <- subset(final_df, Kid_dobcmc < 1368) # kids born before 2014
+
+DHSdesign <- svydesign(id= final_df$IDHSPSU, strata = final_df$IDHSSTRATA, weights = final_df$PERWEIGHT, data=final_df)
+
+DHSdesign10 <- svydesign(id= sub2010$IDHSPSU, strata = sub2010$IDHSSTRATA, weights = sub2010$PERWEIGHT, data=sub2010)
+
+DHSdesign11 <- svydesign(id= sub2011$IDHSPSU, strata = sub2011$IDHSSTRATA, weights = sub2011$PERWEIGHT, data=sub2011)
+
+DHSdesign12 <- svydesign(id= sub2012$IDHSPSU, strata = sub2012$IDHSSTRATA, weights = sub2012$PERWEIGHT, data=sub2012)
+
+DHSdesign13 <- svydesign(id= sub2013$IDHSPSU, strata = sub2013$IDHSSTRATA, weights = sub2013$PERWEIGHT, data=sub2013)
+
+#DHSdesign14 <- svydesign(id= sub2014$IDHSPSU, strata = sub2014$IDHSSTRATA, weights = sub2014$PERWEIGHT, data=sub2014)
+```
+
+#First Level of Analysis- Models 1 and 1a
+
+
+```{r, include=FALSE}
+#Model1- control variables
+Model1<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + WEALTHQ + EDUCLVL + AGE + Kidsex + Kidbord + Kidtwin + KIDAGEMO + L, data=final_df, design=DHSdesign, family=binomial())
+summary(Model1)
+
+#Model1a-climate 2010
+L10_wet<-svyglm(binary_HWHAZWHO~  drinking_water + floor_type +  WEALTHQ + EDUCLVL + AGE + Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2010 + L, data=sub2010, design=DHSdesign10, family=binomial())
+
+L10_dry<-svyglm(binary_HWHAZWHO~  drinking_water + floor_type + WEALTHQ + EDUCLVL + AGE + Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2010 + L, data=sub2010, design=DHSdesign10, family=binomial())
+
+Model1a<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type  + WEALTHQ + EDUCLVL + AGE + Kidsex + Kidbord + Kidtwin + KIDAGEMO +  Wet_Year2010 +  Dry_Year2010 + L, data=sub2010, design=DHSdesign10, family=binomial())
+summary(Model1a)
+
+#Model2a- climate 2011
+Model1b<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type +  WEALTHQ + EDUCLVL + AGE + Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2011 + L, data=sub2011, design=DHSdesign11, family=binomial())
+summary(Model1b)
+#put in a comment about why no dry 2011
+
+#Model3a- climate 2012
+L12_wet<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL +  AGE+ Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2012 + L, data=sub2012, design=DHSdesign12, family=binomial())
+
+L12_dry<-svyglm(binary_HWHAZWHO~  drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL +  AGE+ Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2012 + L, data=sub2012, design=DHSdesign12, family=binomial())
+
+Model1c<-svyglm(binary_HWHAZWHO~  drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL + AGE + Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2012 + L, data=sub2012, design=DHSdesign12, family=binomial())
+summary(Model1c)
+
+
+#Model4a-climate 2013
+L13_dry<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type +  WEALTHQ + EDUCLVL + AGE + Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2013 + L, data=sub2013, design=DHSdesign13, family=binomial())
+
+L13_wet<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type +  WEALTHQ + EDUCLVL + AGE +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2013 + L, data=sub2013, design=DHSdesign13, family=binomial())
+
+Model1d<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + WEALTHQ + EDUCLVL + AGE + Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2013 + Dry_Year2013+ L, data=sub2013, design=DHSdesign13, family=binomial())
+summary(Model1d)
+
+#the whole enchilada (Wet VS. Dry Years)
+#Model5a- wet years 
+Model1e<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type +  WEALTHQ + EDUCLVL + AGE + Kidsex + Kidbord + Kidtwin + KIDAGEMO +  Wet_Year2010 + Wet_Year2011 + Wet_Year2012 +  Wet_Year2013 +L, data=sub2010, design=DHSdesign10, family=binomial())
+summary(Model1e)
+
+#Model6a- dry years
+Model1f<-svyglm(binary_HWHAZWHO~  drinking_water + floor_type +  WEALTHQ + EDUCLVL + AGE + Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2010 +  Dry_Year2012 +  Dry_Year2013 + L, data=sub2010, design=DHSdesign10, family=binomial())
+summary(Model1f)
+```
+
+
+
+```{r, include=FALSE}
+#Second level of analysis
+Model2<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type +AGE+ WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Livelihood, data=final_df, design=DHSdesign, family=binomial())
+
+
+m10_wet<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type +AGE+ WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2010 + Livelihood, data=sub2010, design=DHSdesign10, family=binomial())
+
+m10_dry<-svyglm(binary_HWHAZWHO~ floor_type +  AGE+ WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2010 + Livelihood, data=sub2010, design=DHSdesign10, family=binomial())
+
+Model2a<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type +  AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO +  Wet_Year2010 +  Dry_Year2010 + Livelihood, data=sub2010, design=DHSdesign10, family=binomial())
+summary(Model2a)
+
+Model2b<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2011 + Livelihood, data=sub2011, design=DHSdesign11, family=binomial())
+summary(Model2b)
+#put in a comment about why no dry 2011- no contrasts in levels- all zero
+
+m12_wet<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2012 + Livelihood, data=sub2012, design=DHSdesign12, family=binomial())
+
+m12_dry<-svyglm(binary_HWHAZWHO~  drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2012 + Livelihood, data=sub2012, design=DHSdesign12, family=binomial())
+
+Model2c<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2012 + Livelihood, data=sub2012, design=DHSdesign12, family=binomial())
+summary(Model2c)
+
+#2013
+m13_dry<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2013 + Livelihood, data=sub2013, design=DHSdesign13, family=binomial())
+
+m13_wet<-svyglm(binary_HWHAZWHO~  drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2013 + Livelihood, data=sub2013, design=DHSdesign13, family=binomial())
+
+Model2d<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2013 + Dry_Year2013+ Livelihood, data=sub2013, design=DHSdesign13, family=binomial())
+summary(Model2d)
+
+#the whole enchilada (Wet VS. Dry Years)
+Model2e<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type +  AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO +  Wet_Year2010 + Wet_Year2011 + Wet_Year2012 +  Wet_Year2013 + Livelihood, data=sub2010, design=DHSdesign10, family=binomial())
+summary(Model2e)
+
+Model2f<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2010 +  Dry_Year2012 +  Dry_Year2013 + Livelihood, data=sub2010, design=DHSdesign10, family=binomial())
+summary(Model2f)
+```
+
+
+```{r, include=FALSE}
+#Interactions
+#Models per climate year subset to the children alive during that year
+
+int_10wet<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO +  Wet_Year2010 * Livelihood, data=sub2010, design=DHSdesign10, family=binomial())
+summary(int_10wet)
+
+int_10dry<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2010 * Livelihood, data=sub2010, design=DHSdesign10, family=binomial())
+
+int_11wet<-svyglm(binary_HWHAZWHO~  drinking_water + floor_type +AGE + WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2011 * Livelihood, data=sub2011, design=DHSdesign11, family=binomial())
+
+int_12wet<-svyglm(binary_HWHAZWHO~  drinking_water + floor_type + AGE+ WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2012 * Livelihood, data=sub2012, design=DHSdesign12, family=binomial())
+
+int_12dry<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + AGE+ WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2012 * Livelihood, data=sub2012, design=DHSdesign12, family=binomial())
+
+int_13wet<-svyglm(binary_HWHAZWHO~ drinking_water + floor_type + AGE+ WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Wet_Year2013 * Livelihood, data=sub2013, design=DHSdesign13, family=binomial())
+
+int_13dry<-svyglm(binary_HWHAZWHO~  drinking_water + floor_type + AGE+ WEALTHQ + EDUCLVL +  Kidsex + Kidbord + Kidtwin + KIDAGEMO + Dry_Year2013 * Livelihood, data=sub2013, design=DHSdesign13, family=binomial())
+```
+
+```{r, include=FALSE}
+#ESTICON, include intercept
+
+#--------WET 2010-------
+
+#Livelihood 2
+wet1_2010_2<- c(0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0)
+model1_wet_2010<-esticon(int_10wet, wet1_2010_2, conf.int = TRUE, level=0.95) 
+summary(model1_wet_2010)
+
+#Livelihood 3
+wet1_2010_3<- c(0, 0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0)
+model2_wet_2010<-esticon(int_10wet, wet1_2010_3, conf.int = TRUE, level=0.95) 
+summary(model2_wet_2010)
+
+wet2_2010_3<- c(0, 0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0)
+model3_wet_2010<-esticon(int_10wet, wet2_2010_3, conf.int = TRUE, level=0.95) 
+summary(model3_wet_2010)
+
+#Livelihood 4
+wet1_2010_4<- c(0, 0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0)
+model4_wet_2010<-esticon(int_10wet, wet1_2010_4, conf.int = TRUE, level=0.95) 
+summary(model4_wet_2010)
+
+wet2_2010_4<- c(0, 0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1)
+model5_wet_2010<-esticon(int_10wet, wet2_2010_4, conf.int = TRUE, level=0.95) 
+summary(model5_wet_2010)
+
+
+
+
+#------DRY 2010---"0" (not dry), "1" (dry), "2" (more dry), "3" (most dry)
+
+#Livelihood 2
+Dry1_2010_2<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0,  1, 0, 0, 0, 0)
+model1_dry_2010<- esticon(int_10dry, Dry1_2010_2, conf.int = TRUE, level=0.95)   
+summary(model1_dry_2010)
+
+
+#Livelihood 3
+Dry1_2010_3<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0, 0, 1, 0, 0, 0)
+model2_dry_2010<- esticon(int_10dry, Dry1_2010_3, conf.int = TRUE, level=0.95)   
+summary(model2_dry_2010)
+
+
+Dry2_2010_3<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0)
+model3_dry_2010<- esticon(int_10dry, Dry2_2010_3, conf.int = TRUE, level=0.95)   
+summary(model3_dry_2010)
+
+#Livelihood 4
+Dry1_2010_4<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0, 0, 0, 0, 1, 0)
+model4_dry_2010<- esticon(int_10dry, Dry1_2010_4, conf.int = TRUE, level=0.95)   
+summary(model4_dry_2010)
+
+Dry2_2010_4<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1)
+model5_dry_2010<- esticon(int_10dry, Dry2_2010_4, conf.int = TRUE, level=0.95)   
+summary(model5_dry_2010)
+
+
+
+#------WET 2011------"0" (not wet), "1" (wet), "2" (more wet), "3" (most wet)
+
+#Livelihood 2
+Wet2_2011_2<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0,  1, 0, 0)
+model1_wet_2011<- esticon(int_11wet, Wet2_2011_2, conf.int = TRUE, level=0.95)   
+summary(model1_wet_2011)
+
+
+#Livelihood 3
+Wet2_2011_3<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0)
+model2_wet_2011<- esticon(int_11wet, Wet2_2011_3, conf.int = TRUE, level=0.95)   
+summary(model2_wet_2011)
+
+#Livelihood 4
+Wet2_2011_4<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1)
+model3_wet_2011<- esticon(int_11wet, Wet2_2011_4, conf.int = TRUE, level=0.95)   
+summary(model3_wet_2011)
+
+
+
+
+#--------------WET 2012--------
+#Livelihood 2
+Wet1_2012_2<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0, 1, 0, 0, 0, 0)
+model1_wet_2012<- esticon(int_12wet, Wet1_2012_2, conf.int = TRUE, level=0.95)   
+summary(model1_wet_2012)
+
+
+#Livelihood 3****
+Wet1_2012_3<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0, 0, 1, 0, 0, 0)
+model2_wet_2012<- esticon(int_12wet, Wet1_2012_3, conf.int = TRUE, level=0.95)   
+summary(model2_wet_2012)
+
+#***
+Wet2_2012_3<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0)
+model3_wet_2012<- esticon(int_12wet, Wet2_2012_3, conf.int = TRUE, level=0.95)   
+summary(model3_wet_2012)
+
+#Livelihood 4
+Wet1_2012_4<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0, 0, 0, 0, 1, 0)
+model4_wet_2012<- esticon(int_12wet, Wet1_2012_4, conf.int = TRUE, level=0.95)   
+summary(model4_wet_2012)
+
+
+Wet2_2012_4<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1)
+model5_wet_2012<- esticon(int_12wet, Wet2_2012_4, conf.int = TRUE, level=0.95)   
+summary(model5_wet_2012)
+
+
+
+
+#----------Dry 2012--------------------------
+
+#Livelihood 2
+Dry1_2012_2<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0)
+model1_dry_2012<- esticon(int_12dry, Dry1_2012_2, conf.int = TRUE, level=0.95)   
+summary(model1_dry_2012)
+
+#***
+Dry2_2012_2<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0)
+model2_dry_2012<- esticon(int_12dry, Dry2_2012_2, conf.int = TRUE, level=0.95)   
+summary(model2_dry_2012)
+
+#***
+Dry3_2012_2<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0)
+model3_dry_2012<- esticon(int_12dry, Dry3_2012_2, conf.int = TRUE, level=0.95)   
+summary(model3_dry_2012)
+
+#Livelihood 3**
+Dry1_2012_3<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0)
+model4_dry_2012<- esticon(int_12dry, Dry1_2012_3, conf.int = TRUE, level=0.95)   
+summary(model4_dry_2012)
+
+#***
+Dry2_2012_3<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0)
+model5_dry_2012<- esticon(int_12dry, Dry2_2012_3, conf.int = TRUE, level=0.95)   
+summary(model5_dry_2012)
+
+
+#Livelihood 4
+Dry1_2012_4<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0)
+model6_dry_2012<- esticon(int_12dry, Dry1_2012_4, conf.int = TRUE, level=0.95)   
+summary(model6_dry_2012)
+
+Dry2_2012_4<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)
+model7_dry_2012<- esticon(int_12dry, Dry2_2012_4, conf.int = TRUE, level=0.95)   
+summary(model7_dry_2012)
+
+
+
+#-------Wet 2013------
+Wet1_2013_4<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 1)
+model1_wet_2013<- esticon(int_13wet, Wet1_2013_4, conf.int = TRUE, level=0.95)   
+summary(model1_wet_2013)
+
+
+
+
+#------Dry 2013-----
+
+#Livelihood 2**
+Dry1_2013_2<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0)
+model1_dry_2013<- esticon(int_13dry, Dry1_2013_2, conf.int = TRUE, level=0.95)   
+summary(model1_dry_2013)
+
+#Livelihood 3**
+Dry1_2013_3<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0)
+model2_dry_2013<- esticon(int_13dry, Dry1_2013_3, conf.int = TRUE, level=0.95)   
+summary(model2_dry_2013)
+
+#***
+Dry2_2013_3<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0)
+model3_dry_2013<- esticon(int_13dry, Dry2_2013_3, conf.int = TRUE, level=0.95)   
+summary(model3_dry_2013)
+
+#Livelihood 4
+Dry1_2013_4<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,  0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0)
+model4_dry_2013<- esticon(int_13dry, Dry1_2013_4, conf.int = TRUE, level=0.95)   
+summary(model4_dry_2013)
+
+
+Dry2_2013_4<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0)
+model5_dry_2013<- esticon(int_13dry, Dry2_2013_4, conf.int = TRUE, level=0.95)   
+summary(model5_dry_2013)
+
+Dry3_2013_4<- c(0,0,0,0,0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1)
+model6_dry_2013<- esticon(int_13dry, Dry3_2013_4, conf.int = TRUE, level=0.95)   
+summary(model6_dry_2013)
+
+```
+
+
+
+```{r, results='asis'}
+stargazer(Model1, Model1a, Model1b, Model1c, Model1d, Model1e, Model1f,
+          type = 'latex',
+           float= TRUE,
+          header=FALSE,
+          title="\\textbf{Regression Results by Demographic Characteristics: Level 1}",
+           omit.stat = c("f","adj.rsq"),
+          intercept.bottom=TRUE, 
+          font.size = "small", 
+          column.sep.width = "-5pt",
+           dep.var.labels = "",
+          column.labels=c("\\textbf{Model1}", "\\textbf{Model1a}", "\\textbf{Model1b}", "\\textbf{Model1c}", "\\textbf{Model1d}", "\\textbf{Model1e}", "\\textbf{Model1f}"),
+          no.space=TRUE,
+          dep.var.caption="\\textit{Dependent Variable: Children Stunted (Z-Score)}",
+          add.lines=("\\textit{Drinking Water:(Piped)}"), 
+          table.layout = "=!ldc=ats-n",
+          omit=c("Wet_Year20101","Wet_Year20102", "Dry_Year20101", "Dry_Year20102", "Wet_Year20111", "Wet_Year20112", "Wet_Year20113", "Wet_Year20121", "Wet_Year20122", "Dry_Year20121", "Dry_Year20122", "Dry_Year20123", "Dry_Year20131", "Dry_Year20132", "Dry_Year20133", "Wet_Year20131", "Wet_Year20132", "L"),
+                  covariate.labels=c(
+                 ".                      .Well Water/Surface Water",
+                ".                       .Purchased from supplier",
+               ".                        .Other",
+                    " \\textit{Floor Type (Finished)} Natural",
+                " \\textit{Wealth I (Poorest)} Poorer",             
+                ".                         .Middle",
+                 ".                        .Richer",
+                     ".                   .Richest", 
+               "    \\textit{Education (none)} .Primary",
+                ".                       .Secondary",
+               ".                        .Higher",
+               "Mother's Age",
+               "Child's sex (M)",
+                    "Birth order",
+                          "Twins (Single)",
+                          "Child's age"
+
+))
+
+
+stargazer(Model1, Model1a, Model1b, Model1c, Model1d, Model1e, Model1f,
+          type = 'latex',
+          float= TRUE,
+          header=FALSE,
+          title="\\textbf{Regression Results by Livelihood Zones: Level 1}",
+           omit.stat = c("f","adj.rsq"),
+          intercept.bottom=TRUE, 
+          font.size = "small", 
+          column.sep.width = "-15pt",
+          model.numbers= FALSE,
+           dep.var.labels = "Models",
+           add.lines=("\\textit{Livelihoods}"), 
+          table.layout = "=!ldc=ats-n",
+          column.labels=c("\\textbf{1}","\\textbf{1a}", "\\textbf{1b}", "\\textbf{1c}", "\\textbf{1d}", "\\textbf{1e}", "\\textbf{1f}"),
+          no.space=TRUE,
+          dep.var.caption="\\textit{Dependent Variable: Children Stunted (Z-Score)}",
+          omit=c("drinking_water", "floor_type", "AGE", "WEALTHQ", "EDUCLVL", "Kidsex1", "Kidbord", "Kidtwin1", "KIDAGEMO","Wet_Year20101","Wet_Year20102", "Dry_Year20101", "Dry_Year20102", "Wet_Year20111", "Wet_Year20112", "Wet_Year20113", "Wet_Year20121", "Wet_Year20122", "Dry_Year20121", "Dry_Year20122", "Dry_Year20123", "Dry_Year20131", "Dry_Year20132", "Dry_Year20133", "Wet_Year20131", "Wet_Year20132"))
+
+
+stargazer(Model1a, Model1b, Model1c, Model1d, Model1e, Model1f,
+          type = 'latex',
+          float= TRUE,
+          header=FALSE,
+          title="\\textbf{Regression Results by Climate Water Deficit (Wet vs. Dry): Level 1}",
+           omit.stat = c("f","adj.rsq"),
+          intercept.bottom=TRUE, 
+          font.size = "small", 
+          column.sep.width = "-5pt",
+          model.numbers= FALSE,
+           dep.var.labels = "",
+          column.labels=c("\\textbf{Model1a}", "\\textbf{Model1b}", "\\textbf{Model1c}", "\\textbf{Model1d}", "\\textbf{Model1e}", "\\textbf{Model1f}"),
+          no.space=TRUE,
+          dep.var.caption="\\textit{Dependent Variable: Children Stunted (Z-Score)}",
+          omit=c("drinking_water", "floor_type", "AGE", "WEALTHQ", "EDUCLVL", "Kidsex1", "Kidbord", "Kidtwin1", "KIDAGEMO","L"))
+```
+
+
+
+```{r, results='asis'}
+stargazer(Model2, Model2a, Model2b, Model2c, Model2d, Model2e, Model2f,
+          type = 'latex',
+          float= TRUE,
+          header=FALSE,
+          title="\\textbf{Regression Results by Demographic Characteristics: Level 2}",
+           omit.stat = c("f","adj.rsq"),
+          intercept.bottom=TRUE, 
+          font.size = "small", 
+          column.sep.width = "-3pt",
+           dep.var.labels = "Models",
+          column.labels=c("\\textbf{Model 2}", "\\textbf{Model2a}", "\\textbf{Model2b}", "\\textbf{Model2c}", "\\textbf{Model2d}", "\\textbf{Model2e}", "\\textbf{Model2f}"),
+          no.space=TRUE,
+          dep.var.caption="\\textit{Dependent Variable: Children Stunted (Z-Score)}",
+          add.lines=("\\textit{Drinking Water:(Piped)}"), 
+          table.layout = "=!ldc=ats-n",
+          omit=c("Wet_Year20101","Wet_Year20102", "Dry_Year20101", "Dry_Year20102", "Wet_Year20111", "Wet_Year20112", "Wet_Year20113", "Wet_Year20121", "Wet_Year20122", "Dry_Year20121", "Dry_Year20122", "Dry_Year20123", "Dry_Year20131", "Dry_Year20132", "Dry_Year20133", "Wet_Year20131", "Wet_Year20132", "L"),
+                  covariate.labels=c(
+                 ".                      .Well Water/Surface Water",
+                ".                       .Purchased from supplier",
+               ".                        .Other",
+                    " \\textit{Floor Type (Finished)} Natural",
+                " \\textit{Wealth I (Poorest)} Poorer",             
+                ".                         .Middle",
+                 ".                        .Richer",
+                     ".                   .Richest", 
+               "    \\textit{Education (none)} .Primary",
+                ".                       .Secondary",
+               ".                        .Higher",
+               "Mother's Age",
+               "Child's sex (M)",
+                    "Birth order",
+                          "Twins (Single)",
+                          "Child's age"
+
+))
+
+
+stargazer(Model2, Model2a, Model2b, Model2c, Model2d, Model2e, Model2f,
+          type = 'latex',
+          float= TRUE,
+          header=FALSE,
+          title="\\textbf{Regression Results by Livelihood Zones: Level 2}",
+           omit.stat = c("f","adj.rsq"),
+          intercept.bottom=TRUE, 
+          font.size = "small", 
+          column.sep.width = "-5pt",
+          model.numbers= FALSE,
+           dep.var.labels = "",
+           add.lines=("\\textit{Livelihoods}"), 
+          table.layout = "=!ldc=ats-n",
+          column.labels=c("\\textbf{Model2}","\\textbf{Model2a}", "\\textbf{Model2b}", "\\textbf{Model2c}", "\\textbf{Model2d}", "\\textbf{Model2e}", "\\textbf{Model2f}"),
+          no.space=FALSE,
+          dep.var.caption="\\textit{Dependent Variable: Children Stunted (Z-Score)}",
+          omit=c("drinking_water", "floor_type", "AGE", "WEALTHQ", "EDUCLVL", "Kidsex1", "Kidbord", "Kidtwin1", "KIDAGEMO","Wet_Year20101","Wet_Year20102", "Dry_Year20101", "Dry_Year20102", "Wet_Year20111", "Wet_Year20112", "Wet_Year20113", "Wet_Year20121", "Wet_Year20122", "Dry_Year20121", "Dry_Year20122", "Dry_Year20123", "Dry_Year20131", "Dry_Year20132", "Dry_Year20133", "Wet_Year20131", "Wet_Year20132"),
+          covariate.labels = c("Agro-Pastoralists",
+                               "Small-holder Farmers",
+                               "Large Commercial Farmers"))
+
+
+stargazer(Model2a, Model2b, Model2c, Model2d, Model2e, Model2f,
+          type = 'latex',
+          float= TRUE,
+          header=FALSE,
+          title="\\textbf{Regression Results by Climate Water Deficit (Wet vs. Dry): Level 2}",
+           omit.stat = c("f","adj.rsq"),
+          intercept.bottom=TRUE, 
+          font.size = "small", 
+          column.sep.width = "-5pt",
+          model.numbers= FALSE,
+           dep.var.labels = "",
+          column.labels=c("\\textbf{Model2a}", "\\textbf{Model2b}", "\\textbf{Model2c}", "\\textbf{Model2d}", "\\textbf{Model2e}", "\\textbf{Model2f}"),
+          no.space=TRUE,
+          dep.var.caption="\\textit{Dependent Variable: Children Stunted (Z-Score)}",
+          omit=c("drinking_water", "floor_type", "AGE", "WEALTHQ", "EDUCLVL", "Kidsex1", "Kidbord", "Kidtwin1", "KIDAGEMO","L"))
+```
+
+#DRY Variables:
+#0 to 3="0" (not dry), -1 to 0="1" (dry), -2 to -1= "2" (more dry), less than -2= "3" (most dry)
+
+#WET Variables
+#-3 to 0= "0" (not wet), 0 to 1 = "1" (wet), 1 to 2 = "2" (more wet), more than 2= "3" (most wet)
+
+```{r, results='asis'}
+stargazer(int_12dry,
+          type = 'latex',
+          float= TRUE,
+          header=FALSE,
+          title="\\textbf{Significant Interaction Term Results}",
+           omit.stat = c("f","adj.rsq"),
+          intercept.bottom=TRUE, 
+          font.size = "small", 
+          column.sep.width = "-5pt",
+          model.numbers= FALSE,
+           dep.var.labels = "Dry Year 2012",
+         # column.labels=c("\\textbf{2012 Dry}"),
+          no.space=TRUE,
+          dep.var.caption="\\textit{Dependent Variable: Children Stunted (Z-Score)}",
+          omit=c("drinking_water", "floor_type", "AGE", "WEALTHQ", "EDUCLVL", "Kidsex1", "Kidbord", "Kidtwin1", "KIDAGEMO"),
+          covariate.labels = c("Dry_Year20121", 
+                               "Dry_Year20122",
+                               "Dry_Year20123",
+                               "Agro-Pastoralist",
+                               "Small-Holder Farmers",
+                               "Large-Holder Farmers",
+                    "Dry 20121: Agro-Pastoralists",
+                               "\\textbf{Dry 20122: Agro-Pastoralists}",
+                       "\\textbf{Dry 20123: Agro-Pastoralists}",
+                       "\\textbf{Dry 20121: Small-Holder Farmers}",
+                       "\\textbf{Dry 20122: Small-Holder Farmers}",
+                       "Dry 20121: Large-Holder Farmers",
+                        "Dry 20122: Large-Holder Farmers",
+                    "Dry 20123: Large-Holder Farmers"))
+
+
+
+stargazer(int_12wet,
+          type = 'latex',
+          float= TRUE,
+          header=FALSE,
+          title="\\textbf{Significant Interaction Term Results}",
+           omit.stat = c("f","adj.rsq"),
+          intercept.bottom=TRUE, 
+          font.size = "small", 
+          column.sep.width = "-5pt",
+          model.numbers= FALSE,
+           dep.var.labels = "Wet Year 2012",
+          #column.labels=c("\\textbf{2012 Wet}"),
+          no.space=TRUE,
+          dep.var.caption="\\textit{Dependent Variable: Children Stunted (Z-Score)}",
+          omit=c("drinking_water", "floor_type", "AGE", "WEALTHQ", "EDUCLVL", "Kidsex1", "Kidbord", "Kidtwin1", "KIDAGEMO"),
+          covariate.labels = c("Wet_Year20121", 
+                               "Wet_Year20122",
+                               "Agro-Pastoralist",
+                               "Small-Holder Farmers",
+                            "Large-Holder Farmers",
+            "Wet 20121: Agro-Pastoralists",
+                       "\\textbf{Wet 20121: Small-Holder Farmers}",
+                       "\\textbf{Wet 20122: Small-Holder Farmers}",
+                       "Wet 20121: Large-Holder Farmers",
+                        "Wet 20122: Large-Holder Farmers"))
+
+stargazer(int_13dry,
+          type = 'latex',
+          float= TRUE,
+          header=FALSE,
+          title="\\textbf{Significant Interaction Term Results}",
+           omit.stat = c("f","adj.rsq"),
+          intercept.bottom=TRUE, 
+          font.size = "small", 
+          column.sep.width = "-5pt",
+          model.numbers= FALSE,
+           dep.var.labels = "Dry Year 2013",
+          #column.labels=c("\\textbf{2013 Dry}"),
+          no.space=TRUE,
+          dep.var.caption="\\textit{Dependent Variable: Children Stunted (Z-Score)}",
+          omit=c("drinking_water", "floor_type", "AGE", "WEALTHQ", "EDUCLVL", "Kidsex1", "Kidbord", "Kidtwin1", "KIDAGEMO"),
+  covariate.labels = c("Dry_Year20131", 
+                               "Dry_Year20132",
+                               "Dry_Year20133",
+                               "Agro-Pastoralist",
+                               "Small-Holder Farmers",
+                               "Large-Holder Farmers",
+    "Dry 20131: Agro-Pastoralists",
+                       "\\textbf{Dry 20131: Small-Holder Farmers}",
+                       "Dry 20132: Small-Holder Farmers",
+                       "\\textbf{Dry 20131: Large-Holder Farmers}",
+                       "\\textbf{Dry 20132: Large-Holder Farmers}",
+                       "Dry 20133: Large-Holder Farmers"))
+                       
+                               #"Dry 2010: Small-Holder Farmers",
+                               #"More Dry 2010: Small-Holder Farmers",
+                               #"Dry 2010: Large Commercial Farmers",
+                               #"More Dry 2010: Large Commercial Farmers",
+                               #"Wet 2010: Agro-Pastoralists",
+                              # "More Wet 2010: Agro-Pastoralists",
+                               #"Wet 2010: Small-Holder Farmers",
+                              # "More Wet 2010: Small-Holder Farmers",
+                              # "Wet 2010: Large Commercial Farmers")))
+    
+```
+
+```{r}
+#library(effects)
+
+#int<-svyglm(formula = binary_HWHAZWHO ~ Dry_Year2012 * Livelihood, data = sub2012, design = DHSdesign12, family = binomial())
+#plot(allEffects(int))
+
+#plot(effect("int", ylevels=list(binary_HWHAZWHO=0,1))
+
+#int2<-svyglm(formula = binary_HWHAZWHO ~ Wet_Year2012 * Livelihood, data = sub2012, design = DHSdesign12, family = binomial())
+#plot(allEffects(int2))
+
+#int1int<-svyglm(formula = binary_HWHAZWHO ~ Dry_Year2013 * Livelihood, data = sub2013, design = DHSdesign13, family = binomial())
+#plot(allEffects(int1int))
+```
+
+
+
+
+
+
